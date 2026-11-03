@@ -1,0 +1,368 @@
+/**
+ * Bedside e-ink dashboard — backend (Google Apps Script web app)
+ *
+ * Reads your Google Calendar + Open-Meteo weather and returns one compact JSON
+ * blob for the ESP32. All the "smart" stuff (recurrence expansion, time zones,
+ * emoji stripping, rain windows, deadline detection) happens here so the
+ * firmware only has to draw.
+ *
+ * Deploy: Deploy > New deployment > type "Web app"
+ *         Execute as: Me     Who has access: Anyone
+ * Then put the /exec URL + ?token=... into the firmware's config.h.
+ */
+
+const CONFIG = {
+  // Shared secret. The ESP32 sends it as ?token=...  Make it long and random.
+  TOKEN: 'CHANGE-ME-to-a-long-random-string',
+
+  // 'primary' = jihbin.luo@gmail.com. Add more calendar IDs if you ever want them
+  // (e.g. 'en.usa#holiday@group.v.calendar.google.com' for US holidays).
+  CALENDARS: ['primary'],
+
+  TZ: 'America/Chicago',
+  LAT: 41.584,              // PNW Hammond campus
+  LON: -87.474,
+  METRIC: false,            // true = °C + km/h
+  H24: false,               // 24-hour times in weather notes
+
+  DAYS: 7,                  // today + 6
+  KEY_LOOKAHEAD_DAYS: 14,   // how far ahead the "coming up" box looks
+
+  // Week view only shows "anchor" events so it isn't flooded by daily routine.
+  // Anchors = one-off events, all-day events, key events, and these colors.
+  // '9' = Blueberry (your classes), '' = default calendar color (Work / AV Work).
+  ANCHOR_COLORS: ['9', ''],
+  ANCHOR_TITLES: /^(av )?work\b/i,   // backup in case a color isn't reported
+
+  // Titles matching this become "key" events: flagged everywhere + countdown box.
+  KEY_PATTERN: /\b(deadline|due|submission|submit|exam|midterm|final|quiz|interview|presentation|demo day)\b/i,
+
+  MAX_EVENTS_PER_DAY: 24,
+  RAIN_POP: 40,             // % chance that counts as "it will rain"
+  GUST_WARN: 25,            // mph (use ~40 if METRIC)
+  COLD_FEELS: 32,           // °F feels-like (use 0 if METRIC)
+  WAKING_HOURS: [7, 22],    // weather notes only care about these hours
+};
+
+/* ------------------------------------------------------------------ */
+
+function doGet(e) {
+  const p = (e && e.parameter) || {};
+  if (p.token !== CONFIG.TOKEN) return json_({ ok: false, error: 'bad token' });
+  try {
+    return json_(buildPayload_(new Date()));
+  } catch (err) {
+    console.error(err);
+    return json_({ ok: false, error: String(err).slice(0, 100) });
+  }
+}
+
+/** Run this from the editor to sanity-check the output (View > Logs). */
+function testPayload() {
+  const out = JSON.stringify(buildPayload_(new Date()));
+  console.log(out.length + ' bytes');
+  console.log(out);
+}
+
+function json_(o) {
+  return ContentService.createTextOutput(JSON.stringify(o))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
+/* ------------------------------------------------------------------ */
+
+function buildPayload_(now) {
+  const todayStr = fmt_(now, 'yyyy-MM-dd');
+  const horizon = Math.max(CONFIG.DAYS, CONFIG.KEY_LOOKAHEAD_DAYS);
+  const starts = [];
+  for (let i = 0; i <= horizon; i++) starts.push(dayStart_(todayStr, i));
+
+  const raw = fetchEvents_(starts[0], starts[horizon]);
+  const wx = fetchWeather_(now);
+
+  const days = [];
+  for (let i = 0; i < CONFIG.DAYS; i++) {
+    days.push(buildDay_(starts[i], starts[i + 1], raw, wx, i < 3));
+  }
+
+  return {
+    ok: true,
+    v: 1,
+    ts: Math.floor(now.getTime() / 1000),
+    units: { t: CONFIG.METRIC ? 'C' : 'F', w: CONFIG.METRIC ? 'km/h' : 'mph' },
+    cur: wx ? wx.current : null,
+    days: days,
+    keys: buildKeys_(raw, now, todayStr),
+  };
+}
+
+/** Midnight (as a Date) of today+offset in CONFIG.TZ. Noon math dodges DST. */
+function dayStart_(todayStr, offset) {
+  const noon = Utilities.parseDate(todayStr + ' 12:00', CONFIG.TZ, 'yyyy-MM-dd HH:mm');
+  const ds = fmt_(new Date(noon.getTime() + offset * 86400000), 'yyyy-MM-dd');
+  return Utilities.parseDate(ds + ' 00:00', CONFIG.TZ, 'yyyy-MM-dd HH:mm');
+}
+
+function fetchEvents_(start, end) {
+  const scriptTz = Session.getScriptTimeZone();
+  const out = [];
+  CONFIG.CALENDARS.forEach(function (id) {
+    const cal = id === 'primary' ? CalendarApp.getDefaultCalendar() : CalendarApp.getCalendarById(id);
+    if (!cal) return;
+    cal.getEvents(start, end).forEach(function (ev) {
+      let status = null;
+      try { status = ev.getMyStatus(); } catch (e) { /* not a guest */ }
+      if (status === CalendarApp.GuestStatus.NO) return;          // skip declined
+
+      const rawTitle = ev.getTitle() || '(no title)';
+      const o = {
+        title: clean_(rawTitle, 60),
+        loc: clean_(ev.getLocation() || '', 30),
+        allDay: ev.isAllDayEvent(),
+        color: String(ev.getColor() || ''),
+        recurring: ev.isRecurringEvent(),
+        key: CONFIG.KEY_PATTERN.test(rawTitle),
+      };
+      if (o.allDay) {
+        // getAllDayEndDate() is the day AFTER the event ends (exclusive)
+        o.startDate = Utilities.formatDate(ev.getAllDayStartDate(), scriptTz, 'yyyy-MM-dd');
+        o.endDate = Utilities.formatDate(ev.getAllDayEndDate(), scriptTz, 'yyyy-MM-dd');
+      } else {
+        o.start = ev.getStartTime();
+        o.end = ev.getEndTime();
+      }
+      out.push(o);
+    });
+  });
+  return out;
+}
+
+/** 0 = routine, 1 = anchor (shows in week view), 2 = key (deadline/exam/...) */
+function kindOf_(o) {
+  if (o.key) return 2;
+  if (o.allDay || !o.recurring || CONFIG.ANCHOR_COLORS.indexOf(o.color) >= 0) return 1;
+  if (CONFIG.ANCHOR_TITLES.test(o.title)) return 1;
+  return 0;
+}
+
+function buildDay_(ds, de, raw, wx, withHourly) {
+  const date = fmt_(ds, 'yyyy-MM-dd');
+  const next = fmt_(de, 'yyyy-MM-dd');
+  const day = {
+    date: date,
+    dow: fmt_(ds, 'EEE'),        // Mon
+    dl: fmt_(ds, 'EEEE'),        // Monday
+    md: fmt_(ds, 'MMM d'),       // Oct 26
+    ml: fmt_(ds, 'MMMM d'),      // October 26
+    ev: [],
+    ad: [],
+  };
+
+  raw.forEach(function (o) {
+    if (o.allDay) {
+      const endEx = o.endDate > o.startDate ? o.endDate : next;
+      if (o.startDate <= date && date < endEx) day.ad.push({ t: o.title, k: kindOf_(o) });
+      return;
+    }
+    // overlaps [ds, de) — zero-length events count if they start inside
+    if (o.start < de && (o.end > ds || o.start >= ds)) {
+      day.ev.push({
+        s: o.start < ds ? 0 : mins_(o.start),
+        e: o.end >= de ? 1440 : mins_(o.end),
+        t: o.title,
+        l: o.loc,
+        k: kindOf_(o),
+        f: (o.start < ds ? 1 : 0) | (o.end > de ? 2 : 0),   // 1 = from yesterday, 2 = into tomorrow
+      });
+    }
+  });
+
+  day.ev.sort(function (a, b) { return a.s - b.s || a.e - b.e; });
+  day.ev = day.ev.slice(0, CONFIG.MAX_EVENTS_PER_DAY);
+  day.ad.sort(function (a, b) { return b.k - a.k; });
+  day.ad = day.ad.slice(0, 4);
+
+  if (wx && wx.days[date]) {
+    day.w = wx.days[date];
+    if (withHourly && wx.hourly[date]) day.h = wx.hourly[date];
+  }
+  return day;
+}
+
+/** Next few key events (deadlines, exams...) for the countdown box. */
+function buildKeys_(raw, now, todayStr) {
+  const seen = {};
+  return raw
+    .filter(function (o) { return o.key && (o.allDay ? o.endDate > todayStr : o.end > now); })
+    .map(function (o) {
+      const d = o.allDay ? o.startDate : fmt_(o.start, 'yyyy-MM-dd');
+      return {
+        t: o.title,
+        d: d < todayStr ? todayStr : d,
+        m: o.allDay ? -1 : mins_(o.start),
+        sortKey: (o.allDay ? o.startDate + ' 00:00' : fmt_(o.start, 'yyyy-MM-dd HH:mm')),
+      };
+    })
+    .sort(function (a, b) { return a.sortKey < b.sortKey ? -1 : a.sortKey > b.sortKey ? 1 : 0; })
+    .filter(function (k) { if (seen[k.t]) return false; seen[k.t] = true; return true; })
+    .slice(0, 4)
+    .map(function (k) {
+      const dt = Utilities.parseDate(k.d + ' 12:00', CONFIG.TZ, 'yyyy-MM-dd HH:mm');
+      return { t: shortKey_(k.t), d: k.d, w: fmt_(dt, 'EEE'), m: k.m };
+    });
+}
+
+/* ---------------------------- weather ---------------------------- */
+
+function fetchWeather_(now) {
+  const url = 'https://api.open-meteo.com/v1/forecast'
+    + '?latitude=' + CONFIG.LAT + '&longitude=' + CONFIG.LON
+    + '&current=temperature_2m,apparent_temperature,weather_code,wind_speed_10m,wind_gusts_10m,is_day'
+    + '&hourly=temperature_2m,apparent_temperature,precipitation_probability,weather_code,wind_gusts_10m'
+    + '&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,sunrise,sunset'
+    + '&timezone=' + encodeURIComponent(CONFIG.TZ)
+    + '&forecast_days=' + CONFIG.DAYS
+    + (CONFIG.METRIC ? '&wind_speed_unit=kmh' : '&temperature_unit=fahrenheit&wind_speed_unit=mph');
+  try {
+    const r = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+    if (r.getResponseCode() !== 200) {
+      console.warn('open-meteo HTTP ' + r.getResponseCode());
+      return null;
+    }
+    return shapeWeather_(JSON.parse(r.getContentText()), now);
+  } catch (e) {
+    console.warn('weather failed: ' + e);
+    return null;
+  }
+}
+
+function shapeWeather_(j, now) {
+  const R = Math.round;
+  const c = j.current || {};
+  const current = {
+    t: R(c.temperature_2m), f: R(c.apparent_temperature), c: c.weather_code,
+    w: R(c.wind_speed_10m), g: R(c.wind_gusts_10m), d: c.is_day ? 1 : 0,
+  };
+
+  // group hourly rows by local date / hour
+  const H = j.hourly, byDate = {};
+  for (let i = 0; i < H.time.length; i++) {
+    const parts = H.time[i].split('T');
+    const hour = parseInt(parts[1], 10);
+    (byDate[parts[0]] = byDate[parts[0]] || [])[hour] = {
+      t: H.temperature_2m[i], f: H.apparent_temperature[i], c: H.weather_code[i],
+      p: H.precipitation_probability[i] || 0, g: H.wind_gusts_10m[i] || 0,
+    };
+  }
+
+  const nowDate = fmt_(now, 'yyyy-MM-dd');
+  const nowHour = parseInt(fmt_(now, 'H'), 10);
+  const D = j.daily, days = {}, hourly = {};
+  for (let i = 0; i < D.time.length; i++) {
+    const date = D.time[i];
+    const hrs = byDate[date] || [];
+    const from = date === nowDate ? Math.max(nowHour, CONFIG.WAKING_HOURS[0]) : CONFIG.WAKING_HOURS[0];
+    days[date] = {
+      hi: R(D.temperature_2m_max[i]), lo: R(D.temperature_2m_min[i]),
+      c: D.weather_code[i], p: D.precipitation_probability_max[i] || 0,
+      sr: String(D.sunrise[i]).split('T')[1] || '', ss: String(D.sunset[i]).split('T')[1] || '',
+      n: notes_(hrs, from, CONFIG.WAKING_HOURS[1]),
+    };
+    const row = [];
+    let last = { t: 0, c: 0, p: 0 };
+    for (let h = 0; h < 24; h++) {
+      const x = hrs[h] || last;            // spring-forward gap -> repeat previous hour
+      row.push([R(x.t), x.c, x.p]);
+      last = x;
+    }
+    hourly[date] = row;
+  }
+  return { current: current, days: days, hourly: hourly };
+}
+
+/** "Rain 2p-5p · Gusts 31 mph · Feels 24°" — what matters when you walk everywhere. */
+function notes_(hrs, fromH, toH) {
+  const parts = [];
+  const runs = [];
+  let cur = null;
+  for (let h = fromH; h <= toH; h++) {
+    const x = hrs[h];
+    if (x && x.p >= CONFIG.RAIN_POP) {
+      if (!cur) cur = { a: h, b: h, codes: [] };
+      cur.b = h;
+      cur.codes.push(x.c);
+    } else if (cur) { runs.push(cur); cur = null; }
+  }
+  if (cur) runs.push(cur);
+
+  if (runs.length) {
+    const codes = [].concat.apply([], runs.map(function (r) { return r.codes; }));
+    const has = function (f) { return codes.some(f); };
+    const kind = has(function (c) { return c >= 95; }) ? 'Storms'
+      : has(function (c) { return (c >= 71 && c <= 77) || c === 85 || c === 86; }) ? 'Snow'
+      : has(function (c) { return [56, 57, 66, 67].indexOf(c) >= 0; }) ? 'Ice'
+      : 'Rain';
+    const spans = runs.slice(0, 2).map(function (r) {
+      return (r.a <= fromH && fromH > CONFIG.WAKING_HOURS[0] ? 'now' : hr_(r.a)) + '-' + hr_(r.b + 1);
+    });
+    parts.push(kind + ' ' + spans.join(', '));
+  }
+
+  let gmax = 0, fmin = 999;
+  for (let h = fromH; h <= toH; h++) {
+    const x = hrs[h];
+    if (!x) continue;
+    gmax = Math.max(gmax, x.g);
+    fmin = Math.min(fmin, x.f);
+  }
+  if (gmax >= CONFIG.GUST_WARN) parts.push('Gusts ' + Math.round(gmax) + (CONFIG.METRIC ? ' km/h' : ' mph'));
+  if (fmin <= CONFIG.COLD_FEELS) parts.push('Feels ' + Math.round(fmin) + '°');
+  return parts.join(' · ');
+}
+
+/* ---------------------------- helpers ---------------------------- */
+
+/** "NVIDIA Hackathon: SUBMISSION DEADLINE" -> "NVIDIA Hackathon" (the box already says it's coming up) */
+function shortKey_(t) {
+  const s = t.replace(/\s*[:\-|,]?\s*(submission|deadline|due\b).*$/i, '').trim();
+  return s || t;
+}
+
+function fmt_(d, pattern) { return Utilities.formatDate(d, CONFIG.TZ, pattern); }
+
+function mins_(d) {
+  const hm = fmt_(d, 'HH:mm').split(':');
+  return parseInt(hm[0], 10) * 60 + parseInt(hm[1], 10);
+}
+
+function hr_(h) {
+  h = h % 24;
+  if (CONFIG.H24) return String(h);
+  return (h % 12 === 0 ? 12 : h % 12) + (h < 12 ? 'a' : 'p');
+}
+
+/**
+ * Make text drawable on the panel: the fonts cover Latin-1 (so Spanish
+ * accents work) and GB2312 Chinese. Emoji and other symbols are dropped.
+ */
+function clean_(s, max) {
+  if (!s) return '';
+  s = String(s)
+    .replace(/[‘’‚′]/g, "'")
+    .replace(/[“”„″]/g, '"')
+    .replace(/[–—−]/g, '-')
+    .replace(/…/g, '...')
+    .replace(/[→➡➔⇒]/g, '->')
+    .replace(/←/g, '<-')
+    .replace(/[   ]/g, ' ')
+    .replace(/[^ -~¡-ÿ　-〿一-鿿！-～]/gu, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (s.length > max) s = s.slice(0, max - 3).trim() + '...';
+  return s;
+}
+
+// Exported for local testing under Node (ignored by Apps Script).
+if (typeof module !== 'undefined') {
+  module.exports = { CONFIG, buildPayload_, shapeWeather_, notes_, clean_, buildDay_, kindOf_ };
+}
