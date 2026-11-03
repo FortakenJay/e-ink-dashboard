@@ -79,9 +79,26 @@ const events = fixture.events.map(([date, s, e, title, color, recurring, loc]) =
 });
 
 let weatherJson = fixture.weather;
+const props = { GEMINI_API_KEY: 'test-key' };
+const cacheStore = {};
+let geminiCalls = 0, lastPrompt = '';
+const geminiReply = {
+  summary: 'Graphics, AV Work and Stats back to back - rain 1p-7p, so pack the umbrella before AV Work.',
+  fact: 'Octopuses have three hearts and blue blood; two hearts stop beating when they swim, which is why they prefer crawling.',
+};
 const ctx = {
   console,
-  Utilities: { formatDate, parseDate },
+  Utilities: {
+    formatDate, parseDate,
+    DigestAlgorithm: { MD5: 'md5' }, Charset: { UTF_8: 'utf8' },
+    computeDigest: (alg, s) => [...require('crypto').createHash(alg).update(s, 'utf8').digest()].map(b => b > 127 ? b - 256 : b),
+  },
+  PropertiesService: {
+    getScriptProperties: () => ({ getProperty: k => (k in props ? props[k] : null), setProperty: (k, v) => { props[k] = v; } }),
+  },
+  CacheService: {
+    getScriptCache: () => ({ get: k => cacheStore[k] || null, put: (k, v) => { cacheStore[k] = v; } }),
+  },
   Session: { getScriptTimeZone: () => TZ },
   CalendarApp: {
     GuestStatus: { NO: 'NO', YES: 'YES', OWNER: 'OWNER' },
@@ -91,7 +108,16 @@ const ctx = {
     getCalendarById: () => null,
   },
   UrlFetchApp: {
-    fetch: () => ({ getResponseCode: () => 200, getContentText: () => JSON.stringify(weatherJson) }),
+    fetch: (url, opt) => {
+      if (url.includes('generativelanguage')) {
+        geminiCalls++;
+        assert.strictEqual(opt.headers['x-goog-api-key'], 'test-key');
+        lastPrompt = JSON.parse(opt.payload).contents[0].parts[0].text;
+        const body = { candidates: [{ content: { parts: [{ text: JSON.stringify(geminiReply) }] } }] };
+        return { getResponseCode: () => 200, getContentText: () => JSON.stringify(body) };
+      }
+      return { getResponseCode: () => 200, getContentText: () => JSON.stringify(weatherJson) };
+    },
   },
   ContentService: {
     MimeType: { JSON: 'json' },
@@ -119,6 +145,20 @@ const payload = api.buildPayload_(now);
 const json = JSON.stringify(payload);
 fs.writeFileSync(outPath, json);
 
+// AI brief: one Gemini call, then served from cache; fact sticks for the day
+assert.strictEqual(geminiCalls, 1);
+assert.ok(payload.ai && payload.ai.s && payload.ai.f, 'ai present');
+assert.ok(lastPrompt.includes('Schedule:'), 'prompt has schedule');
+const again = api.buildPayload_(now);
+assert.strictEqual(geminiCalls, 1, 'cached');
+assert.deepStrictEqual(again.ai, payload.ai);
+delete props.GEMINI_API_KEY;
+assert.strictEqual(api.buildPayload_(now).ai, null, 'no key -> no ai');
+props.GEMINI_API_KEY = 'test-key';
+assert.strictEqual(api.hm_(570), '9:30a');
+assert.strictEqual(api.hm_(780), '1p');
+assert.strictEqual(api.hm_(0), '12a');
+
 // sanity checks on the real-calendar fixture
 const d0 = payload.days[0];
 assert.strictEqual(payload.days.length, 7);
@@ -128,6 +168,8 @@ for (const d of payload.days) {
 }
 console.log(`now=${nowIso} bytes=${json.length} today=${d0.date} (${d0.dl}) events/day=${payload.days.map(d => d.ev.length).join(',')}`);
 console.log('keys:', JSON.stringify(payload.keys));
+console.log('ai:', JSON.stringify(payload.ai));
+console.log('prompt:\n' + lastPrompt);
 console.log('notes:', payload.days.map(d => `${d.dow}: ${d.w && d.w.n}`).join(' | '));
 console.log('week anchors:', payload.days.slice(1).map(d => d.dow + '=' + d.ev.filter(e => e.k > 0).map(e => e.t).concat(d.ad.map(a => '[' + a.t + ']')).join('; ')).join(' | '));
 const sun = payload.days.find(d => d.date === '2026-11-01');

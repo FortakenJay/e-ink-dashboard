@@ -82,6 +82,41 @@ const char* fit(const char* s, int maxW, char* buf, size_t cap) {
   return buf;
 }
 
+// Word-wrap `s` into at most maxLines lines in the current font. The first line
+// may be narrower (room for a tag). The last line ends in "..." if text is left over.
+const int WRAP_CAP = 160;
+int wrap(const char* s, int firstW, int restW, int maxLines, char out[][WRAP_CAP]) {
+  int n = 0;
+  char tmp[WRAP_CAP];
+  while (*s && n < maxLines) {
+    while (*s == ' ') s++;
+    if (!*s) break;
+    int maxW = n == 0 ? firstW : restW;
+    size_t len = strlen(s);
+    size_t best = 0;                                               // longest prefix ending at a space
+    if (n < maxLines - 1 && !(len < WRAP_CAP && tw(s) <= maxW)) {
+      for (size_t i = 1; i <= len && i < WRAP_CAP; i++) {
+        if (s[i] != ' ' && s[i] != 0) continue;
+        memcpy(tmp, s, i);
+        tmp[i] = 0;
+        if (tw(tmp) > maxW) break;
+        best = i;
+      }
+    }
+    if (!best) {                       // last line, the rest fits, or one huge word: fit + "..."
+      snprintf(tmp, sizeof(tmp), "%s", s);
+      const char* f = fit(tmp, maxW, out[n], WRAP_CAP);
+      if (f != out[n]) snprintf(out[n], WRAP_CAP, "%s", f);
+      n++;
+      break;
+    }
+    memcpy(out[n], s, best);
+    out[n++][best] = 0;
+    s += best;
+  }
+  return n;
+}
+
 // "NVIDIA Hackathon: SUBMISSION DEADLINE" -> "NVIDIA Hackathon" (for tight spots)
 void keyShort(const char* in, char* out, size_t cap) {
   static const char* cut[] = {"submission", "deadline", " due"};
@@ -679,6 +714,38 @@ void drawWeek(const Dashboard& d, int fromIdx, int x0, int y0, int x1, int y1) {
   }
 }
 
+// Gemini's brief of the day + a fun fact, in a box anchored to y1 (its bottom).
+// Returns the box's top so the agenda can stop above it, or y1 if there's nothing to show.
+int drawBrief(const Dashboard& d, int x0, int x1, int y1) {
+  static char sum[2][WRAP_CAP], fact[3][WRAP_CAP];
+  const int PAD = 10, SUM_LH = 17, FACT_LH = 15;
+  int inner = x1 - x0 - 2 * PAD;
+
+  font(hasCJK(d.aiSummary) ? F_CJK : F_MED);
+  int ns = d.aiSummary[0] ? wrap(d.aiSummary, inner, inner, 2, sum) : 0;
+  font(F_TINY_B);
+  int tagW = tw("FUN FACT") + 10 + 6;
+  smallFont(d.aiFact);
+  int nf = d.aiFact[0] ? wrap(d.aiFact, inner - tagW, inner, ns ? 2 : 3, fact) : 0;
+  if (!ns && !nf) return y1;
+
+  int h = 8 + ns * SUM_LH + (ns && nf ? 8 : 0) + nf * FACT_LH + 5;
+  int top = y1 - h;
+  G->drawRoundRect(x0, top, x1 - x0, h, 6, INK);
+
+  int y = top + 8;
+  font(hasCJK(d.aiSummary) ? F_CJK : F_MED);
+  for (int i = 0; i < ns; i++, y += SUM_LH) txt(x0 + PAD, y + 13, sum[i]);
+  if (ns && nf) { dottedH(x0 + PAD, x1 - PAD, y + 2); y += 8; }
+  for (int i = 0; i < nf; i++, y += FACT_LH) {
+    int x = x0 + PAD;
+    if (i == 0) x += tag(x, y + 11, "FUN FACT", F_TINY_B) + 6;
+    smallFont(d.aiFact);
+    txt(x, y + 11, fact[i]);
+  }
+  return top;
+}
+
 }  // namespace
 
 /* ------------------------------ public ------------------------------ */
@@ -721,7 +788,9 @@ void renderDashboard(Adafruit_GFX& gfx, U8G2_FOR_ADAFRUIT_GFX& u8, const Dashboa
   // left: header + agenda
   drawHeader(d, mainDay, tomorrow, now);
   G->drawFastHLine(LCOL_X0 - 2, 92, LCOL_X1 - LCOL_X0 + 2, INK);
-  drawAgenda(mainDay, tomorrow ? -1 : now.minutes, tomorrow, LCOL_X0, 100, LCOL_X1, 458);
+  int briefTop = drawBrief(d, LCOL_X0 - 8, LCOL_X1 + 4, 458);
+  drawAgenda(mainDay, tomorrow ? -1 : now.minutes, tomorrow, LCOL_X0, 100, LCOL_X1,
+             briefTop < 458 ? briefTop - 6 : 458);
 
   // divider
   G->drawFastVLine(DIV_X, 12, 458, INK);

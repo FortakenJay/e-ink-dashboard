@@ -2,7 +2,7 @@
 
 Waveshare 7.5" e-Paper V2 (800×480) + Waveshare e-Paper ESP32 Driver Board.
 Shows today's time blocks, a countdown to deadlines, the weather that matters when you walk
-everywhere, and the week ahead — pulled from **jihbin.luo@gmail.com**. Read it instead of your phone.
+everywhere, the week ahead, and a Gemini-written brief of the day with a fun fact — pulled from **jihbin.luo@gmail.com**. Read it instead of your phone.
 
 ```
 ┌──────────────── left: TODAY ────────────────┬──────── right ─────────┐
@@ -15,6 +15,9 @@ everywhere, and the week ahead — pulled from **jihbin.luo@gmail.com**. Read it
 │ ▶  9:30a Computer Graphics          1h15     │ Wed 28   ☁ 46°/34°      │
 │   11:00a AV Work                       4h    │  Physics 8a · NLP 9:30a │
 │   ...                                        │ [Fri 30] ! NVIDIA due   │
+│ ╭ Graphics, AV Work, Stats back to back -  ╮ │                         │
+│ │ rain 1p-7p, pack the umbrella.           │ │                         │
+│ ╰ [FUN FACT] Octopuses have three hearts...╯ │                         │
 └──────────────────────────────────────────────┴─────────────────────────┘
 ```
 
@@ -22,7 +25,8 @@ everywhere, and the week ahead — pulled from **jihbin.luo@gmail.com**. Read it
 
 ```
 ESP32 wakes ──WiFi──► Apps Script web app (runs as you) ──► Google Calendar
-   │                          └──────────────────────────► Open-Meteo (weather, no key)
+   │                          ├──────────────────────────► Open-Meteo (weather, no key)
+   │                          └──────────────────────────► Gemini (brief + fun fact, cached)
    │◄──────── ~7 KB JSON ─────┘
    └─ draws, saves a copy to flash, deep-sleeps until the next :00 / :30
 ```
@@ -39,6 +43,10 @@ windows, deadline detection), so the firmware only draws.
 - **THIS WEEK** shows only anchors (classes = Blueberry color, Work / AV Work, one-off events,
   all-day events, deadlines) so the daily routine doesn't drown it. Days with a deadline get an inverted label.
 - Weather note bar only appears when it matters: rain/snow windows during 7a–10p, gusts ≥ 25 mph, feels-like ≤ 32°F.
+- **Brief + fun fact** box at the bottom of the agenda, written by Gemini: a one/two-sentence heads-up
+  about the day (tomorrow after 9:30 PM) and a fun fact that changes daily and doesn't repeat for 20 days.
+  Gemini only runs when the day's calendar/forecast changes (cached), so it's a few calls a day — free tier
+  is plenty. No API key, or Gemini down → the box disappears and the agenda gets the room back.
 - No WiFi? It redraws from the last good copy with an **Offline** tag and retries in 10 min.
 - Press **RST** on the board to force a refresh.
 - Spanish accents and GB2312 Chinese render; emoji in titles are stripped.
@@ -63,6 +71,10 @@ windows, deadline detection), so the firmware only draws.
 6. *Deploy → New deployment → Web app*: **Execute as: Me**, **Who has access: Anyone** → Deploy.
    Copy the `/exec` URL.
 7. Test in a browser: `<exec URL>?token=<your token>` should return JSON starting with `{"ok":true`.
+
+8. **Gemini (optional):** get a free API key at aistudio.google.com → *Get API key*. In Apps Script,
+   *Project Settings → Script properties → Add*: `GEMINI_API_KEY` = your key. Run `testAi` from the
+   editor to check the log shows a brief and a fact. (The key stays in Google; it's never on the board.)
 
 When you edit `Code.gs` later: *Deploy → Manage deployments → ✏️ → Version: New version*, so the
 URL stays the same.
@@ -89,6 +101,8 @@ Compiled clean against esp32 core 3.3.12, GxEPD2 1.6.9, ArduinoJson 7.4.2:
 | Panel driver (if the image is faint/blotchy) | `config.h` → `GxEPD2_750_GDEY075T7` |
 | eduroam-style WiFi (username + password) | `config.h` → `WIFI_ENTERPRISE 1` |
 | Which calendars, °C, location, deadline keywords, week-view anchor colors | `Code.gs` → `CONFIG` |
+| Gemini model, how many past facts to avoid repeating | `Code.gs` → `CONFIG.AI_MODEL`, `AI_FACT_HISTORY` |
+| Tone/length of the brief and what kind of facts | `Code.gs` → prompt in `buildAi_` |
 | Drop the Chinese font (sketch then fits the default partition) | add `#define DASH_CJK 0` at the top of `render.cpp` |
 
 **Going home to Costa Rica for break:** in `Code.gs` set `TZ: 'America/Costa_Rica'`,

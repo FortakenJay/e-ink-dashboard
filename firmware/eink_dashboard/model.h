@@ -78,6 +78,8 @@ struct Dashboard {
   Day days[MAX_DAYS];
   uint8_t nKeys;
   KeyItem keys[MAX_KEYS];
+  char aiSummary[200];          // Gemini's brief of the day ("" = no AI box)
+  char aiFact[240];             // fun fact of the day
   char error[64];
 };
 
