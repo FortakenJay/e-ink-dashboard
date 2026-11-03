@@ -24,6 +24,18 @@
 #define QUIET_UNTIL_MIN      (5 * 60 + 30) // ... until 05:30 (fresh before your 6:30 wake-up)
 #define TOMORROW_VIEW_FROM   (21 * 60 + 30)// after 9:30 PM the agenda flips to tomorrow
 
+#define NTP_RESYNC_HOURS     6             // between wakes the RTC + backend timestamp keep time
+
+// --- Refresh style ---
+// Partial refreshes don't flash black/white; a full one every N wakes clears any ghosting.
+// 8 = a full refresh every ~4 hours (plus the first one each morning). 0 = always full.
+#define FULL_REFRESH_EVERY   8
+
+// --- Over-the-air updates ---
+// When the backend's FW_VERSION is higher than this build's, the board downloads FW_URL and
+// reboots into it. Needs the "Minimal SPIFFS (1.9MB APP with OTA)" partition scheme.
+#define OTA_ENABLED          1
+
 // --- Panel ---
 // Waveshare 7.5" V2 (800x480 B/W). If the picture is faint, blotchy or doesn't
 // update, switch to the GDEY075T7 driver (newer "V2 2023" panels).

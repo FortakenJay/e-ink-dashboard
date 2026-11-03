@@ -80,6 +80,8 @@ struct Dashboard {
   KeyItem keys[MAX_KEYS];
   char aiSummary[200];          // Gemini's brief of the day ("" = no AI box)
   char aiFact[240];             // fun fact of the day
+  int16_t fwVersion;            // newest firmware the backend offers (0 = none)
+  char fwUrl[200];              // where to download it (HTTPS .bin)
   char error[64];
 };
 

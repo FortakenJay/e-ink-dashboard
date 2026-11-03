@@ -30,3 +30,13 @@ inline long secondsToNextWake(long secOfDay, long refreshMin, long flipMin, long
   long wait = next - secOfDay + 5;                             // land just after the boundary
   return wait < 60 ? 60 : wait;
 }
+
+// Full refresh (4 s, flashes black/white, clears ghosting) or partial (1.6 s, no flash)?
+// Full when the panel's previous image isn't known (power-on, RST, OTA reboot, no saved
+// frame), every `fullEvery` partials, and on the first refresh of the morning.
+inline bool wantFullRefresh(bool wokeFromSleep, bool havePrevFrame, int partialsSinceFull, int fullEvery,
+                            long minuteOfDay, long quietUntil, long refreshMin) {
+  if (!wokeFromSleep || !havePrevFrame || fullEvery <= 0) return true;
+  if (partialsSinceFull >= fullEvery) return true;
+  return minuteOfDay >= quietUntil && minuteOfDay < quietUntil + refreshMin;
+}
