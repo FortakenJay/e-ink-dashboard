@@ -42,6 +42,12 @@ const CONFIG = {
   GUST_WARN: 25,            // mph (use ~40 if METRIC)
   COLD_FEELS: 32,           // °F feels-like (use 0 if METRIC)
   WAKING_HOURS: [7, 22],    // weather notes only care about these hours
+
+  // Daily brief + fun fact from Gemini (Google AI Studio). The API key lives in
+  // Project Settings > Script properties as GEMINI_API_KEY — no key = box hidden.
+  AI_MODEL: 'gemini-2.5-flash',
+  TOMORROW_FROM_MIN: 21 * 60 + 30,   // match TOMORROW_VIEW_FROM in config.h
+  AI_FACT_HISTORY: 20,               // remember this many facts so it doesn't repeat
 };
 
 /* ------------------------------------------------------------------ */
@@ -85,6 +91,8 @@ function buildPayload_(now) {
     days.push(buildDay_(starts[i], starts[i + 1], raw, wx, i < 3));
   }
 
+  const keys = buildKeys_(raw, now, todayStr);
+  const tomorrow = mins_(now) >= CONFIG.TOMORROW_FROM_MIN;
   return {
     ok: true,
     v: 1,
@@ -92,7 +100,8 @@ function buildPayload_(now) {
     units: { t: CONFIG.METRIC ? 'C' : 'F', w: CONFIG.METRIC ? 'km/h' : 'mph' },
     cur: wx ? wx.current : null,
     days: days,
-    keys: buildKeys_(raw, now, todayStr),
+    keys: keys,
+    ai: buildAi_(days[tomorrow ? 1 : 0], keys, tomorrow),
   };
 }
 
@@ -320,7 +329,131 @@ function notes_(hrs, fromH, toH) {
   return parts.join(' · ');
 }
 
+/* ------------------------------ AI ------------------------------- */
+
+/**
+ * { s: "one-or-two sentence brief of the day", f: "fun fact" } or null.
+ * The brief is cached on the day's contents, so Gemini only runs again when the
+ * calendar or forecast actually changes; the fact is picked once per date.
+ */
+function buildAi_(day, keys, tomorrow) {
+  const apiKey = PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY');
+  if (!apiKey || !day) return null;
+
+  const props = PropertiesService.getScriptProperties();
+  const cache = CacheService.getScriptCache();
+  const facts = JSON.parse(props.getProperty('AI_FACTS') || '[]');   // [{d, f}], newest last
+  const todays = facts.filter(function (x) { return x.d === day.date; })[0];
+
+  const brief = describeDay_(day, keys, tomorrow);
+  const cacheKey = 'ai_' + day.date + '_' + digest_(brief);
+  const hit = cache.get(cacheKey);
+  if (hit && todays) return { s: hit, f: todays.f };
+
+  const prompt = [
+    'You write the text for a small black-and-white e-ink dashboard on a college student\'s nightstand.',
+    'Here is ' + (tomorrow ? 'TOMORROW' : 'TODAY') + ':',
+    brief,
+    '',
+    'Return JSON with:',
+    '"summary": at most 160 characters. A friendly heads-up about ' + (tomorrow ? 'tomorrow' : 'today') +
+      ' — what the day looks like, the one thing not to forget, and weather only if it changes plans' +
+      ' (they walk everywhere). Plain text, no emoji, no lists, don\'t just list every event.',
+    '"fact": at most 200 characters. One surprising, true fun fact (science, history, space, nature,' +
+      ' language, tech...). Plain text, no emoji, no "Did you know".' +
+      (facts.length ? ' Not about the same thing as any of these: ' +
+        facts.map(function (x) { return x.f; }).join(' | ') : ''),
+  ].join('\n');
+
+  const out = callGemini_(apiKey, prompt);
+  if (!out) return todays ? { s: hit || '', f: todays.f } : null;    // Gemini down: keep today's fact
+
+  const s = clean_(out.summary || '', 180);
+  let f = todays ? todays.f : clean_(out.fact || '', 220);
+  if (!todays && f) {
+    facts.push({ d: day.date, f: f });
+    props.setProperty('AI_FACTS', JSON.stringify(facts.slice(-CONFIG.AI_FACT_HISTORY)));
+  }
+  if (s) cache.put(cacheKey, s, 6 * 3600);
+  return s || f ? { s: s, f: f } : null;
+}
+
+/** Compact plain-text version of the day for the prompt. */
+function describeDay_(day, keys, tomorrow) {
+  const lines = [day.dl + ', ' + day.ml + '.'];
+  if (day.ad.length) lines.push('All day: ' + day.ad.map(function (a) { return a.t; }).join('; '));
+  if (day.ev.length) {
+    lines.push('Schedule: ' + day.ev.map(function (e) {
+      return hm_(e.s) + '-' + hm_(e.e) + ' ' + e.t + (e.k === 2 ? ' (IMPORTANT)' : '');
+    }).join('; '));
+  } else {
+    lines.push('Nothing on the calendar.');
+  }
+  if (day.w) {
+    lines.push('Weather: high ' + day.w.hi + '°, low ' + day.w.lo + '°, ' + day.w.p + '% max precip chance' +
+      (day.w.n ? ', ' + day.w.n : '') + '.');
+  }
+  if (keys.length) {
+    lines.push('Coming up: ' + keys.map(function (k) { return k.t + ' on ' + k.w + ' ' + k.d; }).join('; '));
+  }
+  return lines.join('\n');
+}
+
+function callGemini_(apiKey, prompt) {
+  const url = 'https://generativelanguage.googleapis.com/v1beta/models/' + CONFIG.AI_MODEL + ':generateContent';
+  const gen = {
+    temperature: 0.9,
+    maxOutputTokens: 400,
+    responseMimeType: 'application/json',
+    responseSchema: {
+      type: 'OBJECT',
+      properties: { summary: { type: 'STRING' }, fact: { type: 'STRING' } },
+      required: ['summary', 'fact'],
+    },
+  };
+  if (/^gemini-2\.5-flash/.test(CONFIG.AI_MODEL)) gen.thinkingConfig = { thinkingBudget: 0 };  // fast + cheap
+  try {
+    const r = UrlFetchApp.fetch(url, {
+      method: 'post',
+      contentType: 'application/json',
+      headers: { 'x-goog-api-key': apiKey },
+      payload: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: prompt }] }], generationConfig: gen }),
+      muteHttpExceptions: true,
+    });
+    if (r.getResponseCode() !== 200) {
+      console.warn('gemini HTTP ' + r.getResponseCode() + ': ' + r.getContentText().slice(0, 300));
+      return null;
+    }
+    const j = JSON.parse(r.getContentText());
+    const text = j.candidates[0].content.parts.map(function (p) { return p.text || ''; }).join('');
+    return JSON.parse(text);
+  } catch (e) {
+    console.warn('gemini failed: ' + e);
+    return null;
+  }
+}
+
+/** Run from the editor to see the prompt input and what Gemini returns (View > Logs). */
+function testAi() {
+  const now = new Date();
+  const p = buildPayload_(now);
+  const tomorrow = mins_(now) >= CONFIG.TOMORROW_FROM_MIN;
+  console.log(describeDay_(p.days[tomorrow ? 1 : 0], p.keys, tomorrow));
+  console.log(JSON.stringify(p.ai));
+}
+
 /* ---------------------------- helpers ---------------------------- */
+
+function hm_(m) {
+  if (m >= 1440) return 'midnight';
+  const h = Math.floor(m / 60), mm = m % 60;
+  return hr_(h).replace(/[ap]$/, '') + (mm ? ':' + (mm < 10 ? '0' : '') + mm : '') + (CONFIG.H24 ? '' : h < 12 ? 'a' : 'p');
+}
+
+function digest_(s) {
+  return Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, s, Utilities.Charset.UTF_8)
+    .map(function (b) { return ((b + 256) % 256).toString(16); }).join('').slice(0, 16);
+}
 
 /** "NVIDIA Hackathon: SUBMISSION DEADLINE" -> "NVIDIA Hackathon" (the box already says it's coming up) */
 function shortKey_(t) {
@@ -364,5 +497,5 @@ function clean_(s, max) {
 
 // Exported for local testing under Node (ignored by Apps Script).
 if (typeof module !== 'undefined') {
-  module.exports = { CONFIG, buildPayload_, shapeWeather_, notes_, clean_, buildDay_, kindOf_ };
+  module.exports = { CONFIG, buildPayload_, shapeWeather_, notes_, clean_, buildDay_, kindOf_, describeDay_, hm_ };
 }

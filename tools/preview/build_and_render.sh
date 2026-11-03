@@ -7,7 +7,7 @@ L=${LIBS:-/home/claude/libs}
 FW=$ROOT/firmware/eink_dashboard
 OUT=${OUT:-$HERE/out}; B=$OUT/build; mkdir -p "$B"
 INC="-DARDUINO=10819 -I$HERE/shim -I$L/Adafruit-GFX-Library -I$L/U8g2_for_Adafruit_GFX/src -I$L/ArduinoJson/src -I$FW"
-[ -f "$B/u8g2_fonts.o" ] || gcc -O1 -c "$L/U8g2_for_Adafruit_GFX/src/u8g2_fonts.c" -I"$L/U8g2_for_Adafruit_GFX/src" -o "$B/u8g2_fonts.o"
+[ -f "$B/u8g2_fonts.o" ] || gcc -O1 -DU8G2_USE_LARGE_FONTS -c "$L/U8g2_for_Adafruit_GFX/src/u8g2_fonts.c" -I"$L/U8g2_for_Adafruit_GFX/src" -o "$B/u8g2_fonts.o"
 [ -f "$B/gfx.o" ] || g++ -std=gnu++17 -O1 -w -c $INC "$L/Adafruit-GFX-Library/Adafruit_GFX.cpp" -o "$B/gfx.o"
 [ -f "$B/u8g2gfx.o" ] || g++ -std=gnu++17 -O1 -w -c $INC "$L/U8g2_for_Adafruit_GFX/src/U8g2_for_Adafruit_GFX.cpp" -o "$B/u8g2gfx.o"
 g++ -std=gnu++17 -O1 -Wall -Wextra -c -I"$L/ArduinoJson/src" -I"$FW" "$FW/model.cpp" -o "$B/model.o"
