@@ -111,6 +111,8 @@ bool parseDashboard(const char* json, size_t len, Dashboard& d) {
 
   copyUtf8(d.aiSummary, sizeof(d.aiSummary), doc["ai"]["s"] | "");
   copyUtf8(d.aiFact, sizeof(d.aiFact), doc["ai"]["f"] | "");
+  d.fwVersion = doc["fw"]["v"] | 0;
+  copyUtf8(d.fwUrl, sizeof(d.fwUrl), doc["fw"]["u"] | "");
 
   if (d.nDays == 0) {
     copyUtf8(d.error, sizeof(d.error), "no days in payload");

@@ -54,7 +54,7 @@ function parseDate(s, tz, pat) {
 
 /* ---------- calendar mock from compact fixture ---------- */
 // fixture.events: [date, "HH:MM"|null, "HH:MM"|null, title, color, recurring, location?]
-const events = fixture.events.map(([date, s, e, title, color, recurring, loc]) => {
+function mkEvent([date, s, e, title, color, recurring, loc]) {
   const [y, mo, d] = date.split('-').map(Number);
   const allDay = s === null;
   let start, end;
@@ -76,11 +76,11 @@ const events = fixture.events.map(([date, s, e, title, color, recurring, loc]) =
     getStartTime: () => start, getEndTime: () => end,
     getMyStatus: () => 'OWNER', _s: start, _e: end,
   };
-});
+}
+const events = fixture.events.map(mkEvent);
 
 let weatherJson = fixture.weather;
 const props = { GEMINI_API_KEY: 'test-key' };
-const cacheStore = {};
 let geminiCalls = 0, lastPrompt = '';
 const geminiReply = {
   summary: 'Graphics, AV Work and Stats back to back - rain 1p-7p, so pack the umbrella before AV Work.',
@@ -95,9 +95,6 @@ const ctx = {
   },
   PropertiesService: {
     getScriptProperties: () => ({ getProperty: k => (k in props ? props[k] : null), setProperty: (k, v) => { props[k] = v; } }),
-  },
-  CacheService: {
-    getScriptCache: () => ({ get: k => cacheStore[k] || null, put: (k, v) => { cacheStore[k] = v; } }),
   },
   Session: { getScriptTimeZone: () => TZ },
   CalendarApp: {
@@ -145,16 +142,31 @@ const payload = api.buildPayload_(now);
 const json = JSON.stringify(payload);
 fs.writeFileSync(outPath, json);
 
-// AI brief: one Gemini call, then served from cache; fact sticks for the day
-assert.strictEqual(geminiCalls, 1);
+// AI brief: the board's request only bootstraps once per date; after that it reads what's stored
+assert.strictEqual(geminiCalls, 1, 'bootstrap call when nothing is stored');
 assert.ok(payload.ai && payload.ai.s && payload.ai.f, 'ai present');
 assert.ok(lastPrompt.includes('Schedule:'), 'prompt has schedule');
-const again = api.buildPayload_(now);
-assert.strictEqual(geminiCalls, 1, 'cached');
-assert.deepStrictEqual(again.ai, payload.ai);
+assert.deepStrictEqual(api.buildPayload_(now).ai, payload.ai);
+assert.deepStrictEqual(api.buildPayload_(now, true).ai, payload.ai);
+assert.strictEqual(geminiCalls, 1, 'unchanged day -> stored, even for the trigger');
+// calendar changes: the board keeps showing the stored brief, the trigger refreshes it
+const added = [Object.keys(JSON.parse(props.AI_BRIEFS))[0], '18:00', '18:30', 'Coffee with Ana', '', false];
+fixture.events.push(added);
+events.push(mkEvent(added));
+api.buildPayload_(now);
+assert.strictEqual(geminiCalls, 1, 'board request never waits on Gemini');
+geminiReply.summary = 'Updated brief.';
+assert.strictEqual(api.buildPayload_(now, true).ai.s, 'Updated brief.');
+assert.strictEqual(geminiCalls, 2, 'trigger refetches after a change');
+assert.ok(JSON.parse(props.AI_FACTS).length === 1, 'fact kept for the day');
 delete props.GEMINI_API_KEY;
 assert.strictEqual(api.buildPayload_(now).ai, null, 'no key -> no ai');
 props.GEMINI_API_KEY = 'test-key';
+// OTA advert only when configured
+assert.strictEqual(payload.fw, undefined);
+api.CONFIG.FW_VERSION = 3; api.CONFIG.FW_URL = 'https://example.com/fw.bin';
+assert.strictEqual(JSON.stringify(api.buildPayload_(now).fw), '{"v":3,"u":"https://example.com/fw.bin"}');
+api.CONFIG.FW_VERSION = 0; api.CONFIG.FW_URL = '';
 assert.strictEqual(api.hm_(570), '9:30a');
 assert.strictEqual(api.hm_(780), '1p');
 assert.strictEqual(api.hm_(0), '12a');

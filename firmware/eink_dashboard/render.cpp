@@ -29,7 +29,7 @@ const uint16_t PAPER = 0xFFFF;  // == GxEPD_WHITE
 #define F_TINY_B   u8g2_font_helvB08_tf
 #define F_BIGTEMP  u8g2_font_fub42_tn
 #define F_CJK      u8g2_font_wqy14_t_gb2312
-#define F_CJK_S    u8g2_font_wqy12_t_gb2312
+#define F_CJK_S    F_CJK                      // one GB2312 font: the 12 px one cost 208 KB of flash
 
 // ---- layout ----
 const int LCOL_X0 = 18, LCOL_X1 = 466;     // left column (agenda)

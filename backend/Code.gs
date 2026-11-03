@@ -48,6 +48,11 @@ const CONFIG = {
   AI_MODEL: 'gemini-2.5-flash',
   TOMORROW_FROM_MIN: 21 * 60 + 30,   // match TOMORROW_VIEW_FROM in config.h
   AI_FACT_HISTORY: 20,               // remember this many facts so it doesn't repeat
+
+  // Over-the-air firmware: set FW_VERSION above the board's (eink_dashboard.ino) and FW_URL to
+  // an HTTPS link to the compiled .bin (e.g. a GitHub release asset). 0 / '' = no update.
+  FW_VERSION: 0,
+  FW_URL: '',
 };
 
 /* ------------------------------------------------------------------ */
@@ -77,7 +82,29 @@ function json_(o) {
 
 /* ------------------------------------------------------------------ */
 
-function buildPayload_(now) {
+/**
+ * Hourly trigger (see installTriggers): asks Gemini ahead of time so the board's request
+ * never waits on it. Also covers the next hour, so tomorrow's brief is ready for the 9:30 PM flip.
+ */
+function refreshAi() {
+  const now = new Date();
+  const later = new Date(now.getTime() + 3600000);
+  const a = buildPayload_(now, true);
+  const b = buildPayload_(later, true);
+  console.log('now: ' + JSON.stringify(a.ai) + '\nin an hour: ' + JSON.stringify(b.ai));
+}
+
+/** Run once from the editor: (re)creates the hourly refreshAi trigger. */
+function installTriggers() {
+  ScriptApp.getProjectTriggers().forEach(function (t) {
+    if (t.getHandlerFunction() === 'refreshAi') ScriptApp.deleteTrigger(t);
+  });
+  ScriptApp.newTrigger('refreshAi').timeBased().everyHours(1).create();
+  refreshAi();
+}
+
+/** fetchAi: true = may call Gemini (trigger); false = stored results only (the board's request). */
+function buildPayload_(now, fetchAi) {
   const todayStr = fmt_(now, 'yyyy-MM-dd');
   const horizon = Math.max(CONFIG.DAYS, CONFIG.KEY_LOOKAHEAD_DAYS);
   const starts = [];
@@ -101,7 +128,8 @@ function buildPayload_(now) {
     cur: wx ? wx.current : null,
     days: days,
     keys: keys,
-    ai: buildAi_(days[tomorrow ? 1 : 0], keys, tomorrow),
+    ai: buildAi_(days[tomorrow ? 1 : 0], keys, tomorrow, !!fetchAi),
+    fw: CONFIG.FW_VERSION && CONFIG.FW_URL ? { v: CONFIG.FW_VERSION, u: CONFIG.FW_URL } : undefined,
   };
 }
 
@@ -333,22 +361,25 @@ function notes_(hrs, fromH, toH) {
 
 /**
  * { s: "one-or-two sentence brief of the day", f: "fun fact" } or null.
- * The brief is cached on the day's contents, so Gemini only runs again when the
+ * The brief is stored with a hash of the day's contents, so Gemini only runs again when the
  * calendar or forecast actually changes; the fact is picked once per date.
+ * With fetch = false (the board's request) it never calls Gemini unless nothing at all is
+ * stored for that date yet; a slightly outdated brief is fine until the hourly trigger runs.
  */
-function buildAi_(day, keys, tomorrow) {
-  const apiKey = PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY');
+function buildAi_(day, keys, tomorrow, fetch) {
+  const props = PropertiesService.getScriptProperties();
+  const apiKey = props.getProperty('GEMINI_API_KEY');
   if (!apiKey || !day) return null;
 
-  const props = PropertiesService.getScriptProperties();
-  const cache = CacheService.getScriptCache();
-  const facts = JSON.parse(props.getProperty('AI_FACTS') || '[]');   // [{d, f}], newest last
+  const facts = JSON.parse(props.getProperty('AI_FACTS') || '[]');    // [{d, f}], newest last
+  const briefs = JSON.parse(props.getProperty('AI_BRIEFS') || '{}');  // {date: {h, s}}
   const todays = facts.filter(function (x) { return x.d === day.date; })[0];
+  const stored = briefs[day.date];
 
   const brief = describeDay_(day, keys, tomorrow);
-  const cacheKey = 'ai_' + day.date + '_' + digest_(brief);
-  const hit = cache.get(cacheKey);
-  if (hit && todays) return { s: hit, f: todays.f };
+  const hash = digest_(brief);
+  if (todays && stored && stored.h === hash) return { s: stored.s, f: todays.f };
+  if (!fetch && (todays || stored)) return { s: stored ? stored.s : '', f: todays ? todays.f : '' };
 
   const prompt = [
     'You write the text for a small black-and-white e-ink dashboard on a college student\'s nightstand.',
@@ -366,15 +397,19 @@ function buildAi_(day, keys, tomorrow) {
   ].join('\n');
 
   const out = callGemini_(apiKey, prompt);
-  if (!out) return todays ? { s: hit || '', f: todays.f } : null;    // Gemini down: keep today's fact
+  if (!out) return todays || stored ? { s: stored ? stored.s : '', f: todays ? todays.f : '' } : null;
 
   const s = clean_(out.summary || '', 180);
-  let f = todays ? todays.f : clean_(out.fact || '', 220);
+  const f = todays ? todays.f : clean_(out.fact || '', 220);
   if (!todays && f) {
     facts.push({ d: day.date, f: f });
     props.setProperty('AI_FACTS', JSON.stringify(facts.slice(-CONFIG.AI_FACT_HISTORY)));
   }
-  if (s) cache.put(cacheKey, s, 6 * 3600);
+  if (s) {
+    briefs[day.date] = { h: hash, s: s };
+    Object.keys(briefs).sort().slice(0, -3).forEach(function (d) { delete briefs[d]; });  // keep 3 dates
+    props.setProperty('AI_BRIEFS', JSON.stringify(briefs));
+  }
   return s || f ? { s: s, f: f } : null;
 }
 
@@ -436,7 +471,7 @@ function callGemini_(apiKey, prompt) {
 /** Run from the editor to see the prompt input and what Gemini returns (View > Logs). */
 function testAi() {
   const now = new Date();
-  const p = buildPayload_(now);
+  const p = buildPayload_(now, true);
   const tomorrow = mins_(now) >= CONFIG.TOMORROW_FROM_MIN;
   console.log(describeDay_(p.days[tomorrow ? 1 : 0], p.keys, tomorrow));
   console.log(JSON.stringify(p.ai));

@@ -25,5 +25,13 @@ int main() {
   assert(renderSkewSeconds(hms(21, 20, 0), R) == 0);
   // wrap-around quiet window 23:30-05:30
   assert(inQuietWindow(23 * 60 + 45, 23 * 60 + 30, 5 * 60 + 30) && !inQuietWindow(12 * 60, 23 * 60 + 30, 5 * 60 + 30));
+  // full vs partial refresh
+  assert(wantFullRefresh(false, true, 0, 8, 12 * 60, QU, R));        // power-on / RST
+  assert(wantFullRefresh(true, false, 0, 8, 12 * 60, QU, R));        // no saved frame
+  assert(!wantFullRefresh(true, true, 3, 8, 12 * 60, QU, R));        // normal -> partial
+  assert(wantFullRefresh(true, true, 8, 8, 12 * 60, QU, R));         // every 8th
+  assert(wantFullRefresh(true, true, 1, 8, 5 * 60 + 30, QU, R));     // first of the morning
+  assert(!wantFullRefresh(true, true, 1, 8, 6 * 60, QU, R));
+  assert(wantFullRefresh(true, true, 0, 0, 12 * 60, QU, R));         // 0 = always full
   puts("schedule tests passed");
 }

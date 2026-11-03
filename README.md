@@ -28,7 +28,7 @@ ESP32 wakes ──WiFi──► Apps Script web app (runs as you) ──► Goog
    │                          ├──────────────────────────► Open-Meteo (weather, no key)
    │                          └──────────────────────────► Gemini (brief + fun fact, cached)
    │◄──────── ~7 KB JSON ─────┘
-   └─ draws, saves a copy to flash, deep-sleeps until the next :00 / :30
+   └─ draws (partial refresh, no flash), saves a copy to flash, deep-sleeps until the next :00 / :30
 ```
 
 The backend does the heavy lifting (recurring events, time zones, emoji stripping, rain
@@ -45,10 +45,16 @@ windows, deadline detection), so the firmware only draws.
 - Weather note bar only appears when it matters: rain/snow windows during 7a–10p, gusts ≥ 25 mph, feels-like ≤ 32°F.
 - **Brief + fun fact** box at the bottom of the agenda, written by Gemini: a one/two-sentence heads-up
   about the day (tomorrow after 9:30 PM) and a fun fact that changes daily and doesn't repeat for 20 days.
-  Gemini only runs when the day's calendar/forecast changes (cached), so it's a few calls a day — free tier
-  is plenty. No API key, or Gemini down → the box disappears and the agenda gets the room back.
+  An hourly trigger asks Gemini ahead of time, and only when the day's calendar/forecast changed, so the
+  board's request never waits on it (a few calls a day — free tier is plenty). No API key, or Gemini down →
+  the box disappears and the agenda gets the room back.
+- **No flashing:** most refreshes are partial (~1.6 s, no black/white flash). A full refresh clears ghosting
+  every 8 wakes (~4 h), on the first refresh of the morning, and after any reset.
+- **Quick wakes:** WiFi reconnects straight to the last access point/channel (no scan) and NTP only runs every
+  6 h — in between the backend's timestamp corrects clock drift. Watch `awake N ms` on the serial monitor.
+- **Over-the-air updates:** bump the version, publish the `.bin`, set it in `Code.gs` — see *Updating over WiFi*.
 - No WiFi? It redraws from the last good copy with an **Offline** tag and retries in 10 min.
-- Press **RST** on the board to force a refresh.
+- Press **RST** on the board to force a (full) refresh.
 - Spanish accents and GB2312 Chinese render; emoji in titles are stripped.
 
 ## 1. Hardware
@@ -75,6 +81,8 @@ windows, deadline detection), so the firmware only draws.
 8. **Gemini (optional):** get a free API key at aistudio.google.com → *Get API key*. In Apps Script,
    *Project Settings → Script properties → Add*: `GEMINI_API_KEY` = your key. Run `testAi` from the
    editor to check the log shows a brief and a fact. (The key stays in Google; it's never on the board.)
+   Then run `installTriggers` once (approve the new "run on a schedule" permission) — it sets up the
+   hourly `refreshAi` job.
 
 When you edit `Code.gs` later: *Deploy → Manage deployments → ✏️ → Version: New version*, so the
 URL stays the same.
@@ -86,12 +94,25 @@ URL stays the same.
    **U8g2_for_Adafruit_GFX**, **ArduinoJson** (7.x).
 3. Open `firmware/eink_dashboard/eink_dashboard.ino` and edit `config.h`:
    WiFi name/password and `DASH_URL` = the exec URL + `?token=...`.
-4. *Tools*: Board **ESP32 Dev Module**, Partition Scheme **Huge APP (3MB No OTA/1MB SPIFFS)**
-   (the sketch is ~1.7 MB because of the Chinese font).
+4. *Tools*: Board **ESP32 Dev Module**, Partition Scheme **Minimal SPIFFS (1.9MB APP with OTA/128KB SPIFFS)**
+   (needed for over-the-air updates; the first upload after switching wipes the saved copy, which is fine).
 5. Upload. Open Serial Monitor at 115200 to watch `[wifi] [ntp] [http] [sleep]` lines.
 
 Compiled clean against esp32 core 3.3.12, GxEPD2 1.6.9, ArduinoJson 7.4.2:
-1.73 MB flash, 123 KB RAM.
+1.55 MB flash (of 1.9 MB), 81 KB static RAM + a 48 KB frame on the heap while drawing.
+
+### Updating over WiFi (OTA)
+
+After the first USB upload with the partition scheme above, later builds can go over WiFi:
+
+1. Bump `FW_VERSION` at the top of `eink_dashboard.ino` (e.g. 2 → 3).
+2. *Sketch → Export Compiled Binary*; take `eink_dashboard.ino.bin` from the `build/` folder.
+3. Put it somewhere reachable over HTTPS — e.g. attach it to a GitHub release (public repo) and copy the asset link.
+4. In `Code.gs` set `FW_VERSION: 3` and `FW_URL: '<that link>'`, then redeploy (*New version*).
+
+On its next wake the board sees the newer version, downloads it, and reboots into it (full refresh).
+If a build fails to install three times in a row it stops trying that version. Test a build over USB
+first — a build that crashes on boot needs USB to recover.
 
 ## Customizing
 
@@ -103,7 +124,8 @@ Compiled clean against esp32 core 3.3.12, GxEPD2 1.6.9, ArduinoJson 7.4.2:
 | Which calendars, °C, location, deadline keywords, week-view anchor colors | `Code.gs` → `CONFIG` |
 | Gemini model, how many past facts to avoid repeating | `Code.gs` → `CONFIG.AI_MODEL`, `AI_FACT_HISTORY` |
 | Tone/length of the brief and what kind of facts | `Code.gs` → prompt in `buildAi_` |
-| Drop the Chinese font (sketch then fits the default partition) | add `#define DASH_CJK 0` at the top of `render.cpp` |
+| Drop the Chinese font (saves 250 KB of flash) | add `#define DASH_CJK 0` at the top of `render.cpp` |
+| How often a full (flashing) refresh runs, NTP interval, OTA on/off | `config.h` → `FULL_REFRESH_EVERY`, `NTP_RESYNC_HOURS`, `OTA_ENABLED` |
 
 **Going home to Costa Rica for break:** in `Code.gs` set `TZ: 'America/Costa_Rica'`,
 `LAT: 9.93, LON: -84.09`, `METRIC: true` (if you want °C); in `config.h` set
@@ -118,6 +140,7 @@ Compiled clean against esp32 core 3.3.12, GxEPD2 1.6.9, ArduinoJson 7.4.2:
 | HTTP 401/403, or an HTML page | Deployment access isn't **Anyone**, or you're using a `/dev` URL instead of `/exec`. |
 | `connection refused` / `-1` | Usually transient; it retries in 10 min. If it persists, re-check the URL. |
 | Image faint, blotchy, partly drawn | Flip the Display Config switch, or try the `GxEPD2_750_GDEY075T7` driver. |
+| Leftover gray "ghosts" between full refreshes | Lower `FULL_REFRESH_EVERY` in config.h (e.g. 4), or 0 for always-full. |
 | Times off by an hour | `TZ_POSIX` in config.h doesn't match `TZ` in Code.gs. |
 
 ## Files
@@ -125,7 +148,7 @@ Compiled clean against esp32 core 3.3.12, GxEPD2 1.6.9, ArduinoJson 7.4.2:
 ```
 backend/Code.gs, appsscript.json      Apps Script web app
 firmware/eink_dashboard/
-  eink_dashboard.ino                  WiFi, fetch, cache, deep sleep
+  eink_dashboard.ino                  WiFi, fetch, cache, OTA, partial/full refresh, deep sleep
   config.h                            your settings
   model.h/.cpp                        JSON → structs (ArduinoJson)
   render.h/.cpp                       all drawing (fonts, layout, weather icons)
