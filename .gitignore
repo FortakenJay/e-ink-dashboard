@@ -1,0 +1,11 @@
+# Local secrets — never commit. Copy secrets.example.h to secrets.h and fill it in.
+firmware/eink_dashboard/secrets.h
+
+# Preview build output
+tools/preview/out/
+
+__pycache__/
+*.pyc
+.DS_Store
+.vscode/
+build/
